@@ -4,14 +4,14 @@
 package main
 
 import (
-    "github.com/influxdb/influxdb/client"
+    client "github.com/influxdata/influxdb/client/v2"
     "github.com/pelletier/go-toml"
     "fmt"
     "log"
     "os"
     "bufio"
     "os/exec"
-    "net/url"
+    //"net/url"
     "strings"
     "time"
     "strconv"
@@ -34,7 +34,7 @@ func slashSplitter(c rune) bool {
     return c == '/'
 }
 
-func readPoints(config *toml.TomlTree, con *client.Client) {
+func readPoints(config *toml.TomlTree, con client.Client) {
     args := []string{"-B 1", "-D", "-r0", "-O 0", "-Q 10", "-p 1000", "-l"}
     hosts := config.Get("hosts.hosts").([]interface{})
     for _, v := range hosts {
@@ -42,7 +42,8 @@ func readPoints(config *toml.TomlTree, con *client.Client) {
         args = append(args, host)
     }
     log.Printf("Going to ping the following hosts: %q", hosts)
-    cmd := exec.Command("/usr/bin/fping", args...)
+    fping := config.Get("influxdb.fping").(string)
+    cmd := exec.Command(fping, args...)
     stdout, err := cmd.StdoutPipe()
     herr(err)
     stderr, err := cmd.StderrPipe()
@@ -79,11 +80,12 @@ func readPoints(config *toml.TomlTree, con *client.Client) {
     log.Printf("stdout:%s", line)
 }
 
-func writePoints(config *toml.TomlTree, con *client.Client, host string, sent string, recv string, lossp string, min string, avg string, max string) {
+func writePoints(config *toml.TomlTree, con client.Client, host string, sent string, recv string, lossp string, min string, avg string, max string) {
     db := config.Get("influxdb.db").(string)
+
     loss, _ := strconv.Atoi(lossp)
-    pts := make([]client.Point, 1)
     fields := map[string]interface{}{}
+
     if min != "" && avg != "" && max != "" {
         min, _ := strconv.ParseFloat(min, 64)
         avg, _ := strconv.ParseFloat(avg, 64)
@@ -99,23 +101,22 @@ func writePoints(config *toml.TomlTree, con *client.Client, host string, sent st
                 "loss": loss,
         }
     }
-    pts[0] = client.Point{
-        Measurement: "ping",
-        Tags: map[string]string{
-            "host": host,
-        },
-        Fields: fields,
-        Time: time.Now(),
-        Precision: "s",
+
+    tags := map[string]string {
+      "host": host,
     }
 
-    bps := client.BatchPoints{
-        Points:          pts,
+    retentionPolicy := config.Get("influxdb.retentionpolicy").(string)
+    measurement := config.Get("influxdb.measurement").(string)
+    pt, err := client.NewPoint(measurement, tags, fields, time.Now())
+    bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
         Database:        db,
-        RetentionPolicy: "default",
-    }
-    _, err := con.Write(bps)
-    if err != nil {
+        RetentionPolicy: retentionPolicy,
+    })
+    bp.AddPoint(pt)
+
+    err2 := con.Write(bp)
+    if err2 != nil {
         log.Fatal(err)
     }
 }
@@ -129,27 +130,27 @@ func main() {
 
     host := config.Get("influxdb.host").(string)
     port := config.Get("influxdb.port").(string)
-    //measurement := config.Get("influxdb.measurement").(string)
     username := config.Get("influxdb.user").(string)
     password := config.Get("influxdb.pass").(string)
 
-    u, err := url.Parse(fmt.Sprintf("http://%s:%s", host, port))
+    //u, err := url.Parse(fmt.Sprintf("http://%s:%s", host, port))
+    u := fmt.Sprintf("http://%s:%s", host, port)
     if err != nil {
         log.Fatal(err)
     }
 
-    conf := client.Config{
-        URL:      *u,
+    conf := client.HTTPConfig{
+        Addr:     u,
         Username: username,
         Password: password,
     }
 
-    con, err := client.NewClient(conf)
+    con, err := client.NewHTTPClient(conf)
     if err != nil {
         log.Fatal(err)
     }
 
-    dur, ver, err := con.Ping()
+    dur, ver, err := con.Ping(2000)
     if err != nil {
         log.Fatal(err)
     }
